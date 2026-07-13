@@ -66,7 +66,8 @@
 
 | Model | Wired | Wireless | Status |
 |-------|-------|----------|:------:|
-| Model O / O- | ❔ | ❔ | Untested |
+| Model O | ✅ | ✅ | ✅ Working - contributed by [@cortex09](https://github.com/cortex09) |
+| Model O- | ❔ | ❔ | Untested |
 | Model O2 | ❔ | ❔ | Untested |
 | Model D | ✅ | ✅ | ✅ Working |
 | Model D- | ❔ | ❔ | Untested |
@@ -160,7 +161,7 @@ Some antivirus software may flag the executable.
 ## 🙏 Acknowledgments
 
 - [AwesomeTy18/GloriousBatteryMonitor](https://github.com/AwesomeTy18/GloriousBatteryMonitor) – Original C# reference for HID protocol research
-
+- [@cortex09](https://github.com/cortex09) – Contributed Glorious Model O Wireless PID `0x2022` support.
 ---
 
 ## ☕ Support
