@@ -20,15 +20,15 @@
 - 🔋 **Live Battery Percentage** – Exact value from your Glorious mouse (no LED guessing)
 - ⚡ **Charging Detection** – Shows charge state in real-time
 - 🎯 **System Tray Integration** – Clean tray icon with quick controls
-- 📅 **Charge History** – Tracks last charge level and time
+- ~~📅 **Charge History** – Tracks last charge level and time~~
 - 🔄 **Auto Reconnect** – Detects when mouse is plugged/unplugged
-- 🔁 **Auto Updates** – Ships updates silently via Velopack
-- ⚙️ **Custom Alerts** – Set low and critical battery warnings
+- ~~🔁 **Auto Updates** – Ships updates silently via Velopack~~
+- ~~⚙️ **Custom Alerts** – Set low and critical battery warnings~~
 - 💾 **Lightweight** – App uses ~10MB RAM
 - 🛡️ **Safe HID Mode** – Read-only probing by default with Glorious-specific allowlisting
 
-> ⏱️ **Note:** The "time remaining" value is **only an estimation** and may not always be accurate.  
-> This is a **known limitation**, and we're working to improve its accuracy in future releases.
+~~> ⏱️ **Note:** The "time remaining" value is **only an estimation** and may not always be accurate.~~  
+~~> This is a **known limitation**, and we're working to improve its accuracy in future releases.~~
 
 ---
 
