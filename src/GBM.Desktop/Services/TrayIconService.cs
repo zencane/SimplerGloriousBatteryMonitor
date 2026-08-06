@@ -72,7 +72,7 @@ public class TrayIconService : IDisposable
             {
                 var item = new NativeMenuItem(FormatRefreshRateLabel(seconds))
                 {
-                    ToggleType = NativeMenuItemToggleType.Radio,
+                    ToggleType = MenuItemToggleType.Radio,
                     IsChecked = seconds == currentInterval
                 };
                 item.Click += (_, _) => SetRefreshInterval(seconds);
