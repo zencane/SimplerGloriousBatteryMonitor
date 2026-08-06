@@ -4,6 +4,11 @@ on:
   push:
     tags:
       - 'v[0-9]*.[0-9]*.[0-9]*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Version tag to release (e.g. v3.6.0) — must already exist'
+        required: true
 
 permissions:
   contents: write
@@ -18,13 +23,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
           fetch-depth: 0   # full history needed for changelog generation
 
       - name: Extract version from tag
         id: version
         shell: pwsh
         run: |
-          $tag = "${{ github.ref_name }}"
+          $tag = "${{ github.event.inputs.tag }}"
+          if ([string]::IsNullOrWhiteSpace($tag)) { $tag = "${{ github.ref_name }}" }
           $version = $tag.TrimStart('v')
           echo "VERSION=$version" >> $env:GITHUB_OUTPUT
           echo "TAG=$tag" >> $env:GITHUB_OUTPUT
