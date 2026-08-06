@@ -60,7 +60,7 @@ public class TrayIconService : IDisposable
 
             _startWithWindowsItem = new NativeMenuItem("Start with Windows")
             {
-                ToggleType = NativeMenuItemToggleType.CheckBox,
+                ToggleType = MenuItemToggleType.CheckBox,
                 IsChecked = _autoStartService.IsEnabled()
             };
             _startWithWindowsItem.Click += (_, _) => ToggleStartWithWindows();
