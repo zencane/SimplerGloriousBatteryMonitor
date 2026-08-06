@@ -8,7 +8,7 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
     <ApplicationIcon>Assets\app-icon.ico</ApplicationIcon>
-    <AssemblyName>GBM.Desktop</AssemblyName>
+    <AssemblyName>Simple-GBM</AssemblyName>
     <Product>Glorious Battery Monitor</Product>
     <PublishSingleFile>true</PublishSingleFile>
     <Authors>Glorious Battery Monitor</Authors>

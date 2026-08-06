@@ -103,7 +103,7 @@ public class TrayIconService : IDisposable
 
             try
             {
-                var uri = new Uri("avares://GBM.Desktop/Assets/app-icon.ico");
+                var uri = new Uri("avares://Simple-GBM/Assets/app-icon.ico");
                 _currentIcon = new WindowIcon(AssetLoader.Open(uri));
                 _trayIcon.Icon = _currentIcon;
             }
