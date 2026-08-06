@@ -78,9 +78,6 @@ jobs:
           $exePath = "$extractPath\git-cliff-${version}\git-cliff.exe"
           & $exePath --config cliff.toml --latest --strip header | Out-File -FilePath RELEASE_NOTES.md -Encoding utf8
 
-      - name: Install Velopack CLI
-        run: dotnet tool install -g vpk
-
       - name: Publish self-contained Windows x64
         run: >
           dotnet publish src/GBM.Desktop/GBM.Desktop.csproj
@@ -92,29 +89,17 @@ jobs:
           -p:DebugType=None
           -p:DebugSymbols=false
 
-      - name: Download previous release for delta generation
-        run: >
-          vpk download github
-          --repoUrl https://github.com/${{ github.repository }}
-          --token ${{ secrets.VELOPACK_GITHUB_TOKEN }}
-          --outputDir releases/
-        continue-on-error: true
-
-      - name: Pack with Velopack
-        run: >
-          vpk pack
-          --packId GloriousBatteryMonitor
-          --packVersion ${{ steps.version.outputs.VERSION }}
-          --packDir publish/win-x64
-          --mainExe GBM.Desktop.exe
-          --packTitle "Glorious Battery Monitor"
-          --outputDir releases/
-          --icon src/GBM.Desktop/Assets/app-icon.ico
+      - name: Package release zip
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path releases | Out-Null
+          $zipPath = "releases/GloriousBatteryMonitor-${{ steps.version.outputs.TAG }}-win-x64.zip"
+          Compress-Archive -Path publish/win-x64/* -DestinationPath $zipPath
 
       - name: Create GitHub Release
         shell: pwsh
         env:
-          GH_TOKEN: ${{ secrets.VELOPACK_GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $tag = "${{ steps.version.outputs.TAG }}"
           $version = "${{ steps.version.outputs.VERSION }}"
