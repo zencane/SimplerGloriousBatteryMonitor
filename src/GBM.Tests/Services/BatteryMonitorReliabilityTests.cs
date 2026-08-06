@@ -13,7 +13,7 @@ public class BatteryMonitorReliabilityTests
     [Fact]
     public void ProcessFailedRead_DoesNotReconnect_WhenAbsenceIsNotCorroborated()
     {
-        var monitor = CreateMonitor(out var hid, out _, out _, out _);
+        var monitor = CreateMonitor(out var hid, out _, out _);
         var profile = CreateProfile();
 
         SetPrivateField(monitor, "_activeProfile", profile);
@@ -43,7 +43,7 @@ public class BatteryMonitorReliabilityTests
     [Fact]
     public void ProcessFailedRead_ReconnectRequiresAbsenceEvidence_AndRespectsCooldown()
     {
-        var monitor = CreateMonitor(out var hid, out _, out _, out _);
+        var monitor = CreateMonitor(out var hid, out _, out _);
         var profile = CreateProfile();
 
         hid.Setup(s => s.IsDevicePresent(It.IsAny<DeviceProfile>())).Returns(false);
@@ -69,35 +69,9 @@ public class BatteryMonitorReliabilityTests
     }
 
     [Fact]
-    public void ProcessSuccessfulRead_PersistsLearnedRatesPeriodically_WithoutPhaseChange()
-    {
-        var monitor = CreateMonitor(out _, out _, out var storage, out var estimation);
-        var profile = CreateProfile();
-
-        estimation
-            .Setup(e => e.GetLearnedRates(It.IsAny<string>()))
-            .Returns(new LearnedRates(0.61, 40.0, 8, 3));
-
-        SetPrivateField(monitor, "_activeProfile", profile);
-        SetPrivateField(monitor, "_lastLearnedRatesPersistUtc", DateTime.UtcNow - TimeSpan.FromMinutes(10));
-
-        InvokePrivate(monitor, "ProcessSuccessfulRead", 80, false, false);
-
-        storage.Verify(
-            s => s.UpdateLearnedRates(
-                profile.CompositeKey,
-                0.61,
-                40.0,
-                8,
-                3,
-                false),
-            Times.Once);
-    }
-
-    [Fact]
     public void FailFailSuccessCadence_DoesNotDropActiveProfile()
     {
-        var monitor = CreateMonitor(out _, out _, out _, out _);
+        var monitor = CreateMonitor(out _, out _, out _);
         var profile = CreateProfile();
 
         SetPrivateField(monitor, "_activeProfile", profile);
@@ -114,28 +88,9 @@ public class BatteryMonitorReliabilityTests
     }
 
     [Fact]
-    public void SleepAndWakeTransitions_DoNotFeedEstimatorSamples()
-    {
-        var monitor = CreateMonitor(out _, out _, out _, out var estimation);
-        var profile = CreateProfile();
-
-        SetPrivateField(monitor, "_activeProfile", profile);
-        SetPrivateField(monitor, "_lastPositiveLevel", 75);
-
-        InvokePrivate(monitor, "ProcessSuccessfulRead", 0, false, false);
-        InvokePrivate(monitor, "ProcessSuccessfulRead", 0, false, false);
-        InvokePrivate(monitor, "ProcessSuccessfulRead", 0, false, false);
-        InvokePrivate(monitor, "ProcessSuccessfulRead", 74, false, false);
-
-        estimation.Verify(
-            e => e.AddSample(It.IsAny<string>(), It.IsAny<int>(), It.IsAny<bool>()),
-            Times.Never);
-    }
-
-    [Fact]
     public async Task PollOnceAsync_WhenWiredAndRealtimeReadIsPlausible_UsesRealtimeLevel()
     {
-        var monitor = CreateMonitor(out var hid, out _, out _, out _);
+        var monitor = CreateMonitor(out var hid, out _, out _);
         var profile = CreateProfile();
 
         SetPrivateField(monitor, "_activeProfile", profile);
@@ -154,16 +109,14 @@ public class BatteryMonitorReliabilityTests
     }
 
     [Fact]
-    public async Task PollOnceAsync_WhenWiredAndRealtimeReadLooksSuspicious_FallsBackToEstimate()
+    public async Task PollOnceAsync_WhenWiredAndRealtimeReadLooksSuspicious_FallsBackToLastKnownLevel()
     {
-        var monitor = CreateMonitor(out var hid, out _, out _, out _);
+        var monitor = CreateMonitor(out var hid, out _, out _);
         var profile = CreateProfile();
 
         SetPrivateField(monitor, "_activeProfile", profile);
         SetPrivateField(monitor, "_lastWiredPresent", true);
         SetPrivateField(monitor, "_lastPositiveLevel", 70);
-        SetPrivateField(monitor, "_chargeStartTime", null);
-        SetPrivateField(monitor, "_chargeStartLevel", 0);
 
         hid.Setup(s => s.IsWiredDevicePresent(profile.ModelName)).Returns(true);
         hid.Setup(s => s.ReadBattery(It.Is<DeviceProfile>(p => p == profile)))
@@ -176,51 +129,9 @@ public class BatteryMonitorReliabilityTests
     }
 
     [Fact]
-    public void ProcessSuccessfulRead_FirstStableReadAfterUnplug_LearnsCalibration()
-    {
-        var monitor = CreateMonitor(out _, out _, out _, out var estimation);
-        var profile = CreateProfile();
-
-        SetPrivateField(monitor, "_activeProfile", profile);
-        SetPrivateField(monitor, "_awaitingUnplugCalibrationSample", true);
-        SetPrivateField(monitor, "_pendingUnplugCalibrationAnchorLevel", 100);
-        SetPrivateField(monitor, "_pendingUnplugCalibrationUtc", DateTime.UtcNow - TimeSpan.FromSeconds(20));
-
-        InvokePrivate(monitor, "ProcessSuccessfulRead", 86, false, false);
-
-        estimation.Verify(
-            e => e.ObserveChargeDropAfterUnplug(profile.CompositeKey, 100, 86, It.IsAny<TimeSpan>()),
-            Times.Once);
-    }
-
-    [Fact]
-    public void ProcessSuccessfulRead_NonChargingHigherLevel_PromotesChargedToLevel()
-    {
-        var monitor = CreateMonitor(out _, out _, out var storage, out _);
-        var profile = CreateProfile();
-
-        SetPrivateField(monitor, "_activeProfile", profile);
-        storage.Setup(s => s.GetDeviceChargeData(profile.CompositeKey)).Returns(new DeviceChargeData
-        {
-            CompositeKey = profile.CompositeKey,
-            LastKnownLevel = 75,
-            LastReadTime = DateTime.UtcNow.AddMinutes(-10),
-            LastChargeTime = DateTime.UtcNow.AddMinutes(-10),
-            LastChargeLevel = 75
-        });
-
-        InvokePrivate(monitor, "ProcessSuccessfulRead", 100, false, false);
-
-        monitor.CurrentState.Level.Should().Be(100);
-        monitor.CurrentState.IsCharging.Should().BeFalse();
-        monitor.CurrentState.LastChargeLevel.Should().Be(100);
-        monitor.CurrentState.LastChargeTime.Should().NotBeNull();
-    }
-
-    [Fact]
     public void ProcessFailedRead_CandidateG_UsesHigherFailureThresholdBeforeReconnect()
     {
-        var monitor = CreateMonitor(out var hid, out _, out _, out _);
+        var monitor = CreateMonitor(out var hid, out _, out _);
         var profile = CreateProfile(PixartBatteryMethod.CandidateG);
 
         hid.Setup(s => s.IsDevicePresent(It.IsAny<DeviceProfile>())).Returns(false);
@@ -241,46 +152,25 @@ public class BatteryMonitorReliabilityTests
     private static BatteryMonitorService CreateMonitor(
         out Mock<IHidDeviceService> hid,
         out Mock<ISettingsService> settings,
-        out Mock<IStorageService> storage,
-        out Mock<IBatteryEstimationService> estimation)
+        out Mock<IStorageService> storage)
     {
         var logger = new Mock<ILogger<BatteryMonitorService>>();
         hid = new Mock<IHidDeviceService>();
         settings = new Mock<ISettingsService>();
         storage = new Mock<IStorageService>();
-        estimation = new Mock<IBatteryEstimationService>();
-        var notification = new Mock<INotificationService>();
 
         settings.SetupGet(s => s.Current).Returns(new AppSettings
         {
-            CriticalBatteryThreshold = 10,
             RefreshIntervalSeconds = 5
         });
 
-        storage.Setup(s => s.GetDeviceChargeData(It.IsAny<string>())).Returns((DeviceChargeData?)null);
         storage.Setup(s => s.LoadProfiles()).Returns(new List<DeviceProfile>());
-        storage.Setup(s => s.LoadChargeData()).Returns(new ChargeData());
-
-        estimation.Setup(e => e.GetEstimate(It.IsAny<string>())).Returns(new BatteryEstimate
-        {
-            IsValid = true,
-            TimeRemaining = TimeSpan.FromHours(4),
-            Confidence = 0.5,
-            Phase = "discharge",
-            RatePerHour = 1.0,
-            SampleCount = 1,
-            IsHistorical = true
-        });
-        estimation.Setup(e => e.GetLearnedRates(It.IsAny<string>())).Returns((LearnedRates?)null);
-        estimation.Setup(e => e.GetChargeCalibration(It.IsAny<string>())).Returns((ChargeCalibration?)null);
 
         return new BatteryMonitorService(
             logger.Object,
             hid.Object,
             settings.Object,
-            storage.Object,
-            estimation.Object,
-            notification.Object);
+            storage.Object);
     }
 
     private static DeviceProfile CreateProfile(PixartBatteryMethod method = PixartBatteryMethod.CandidateA)

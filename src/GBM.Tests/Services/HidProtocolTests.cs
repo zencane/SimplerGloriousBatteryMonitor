@@ -114,34 +114,6 @@ public class HidProtocolTests
     }
 
     [Fact]
-    public void BatteryState_DeriveHealth_Good()
-    {
-        BatteryState.DeriveHealth(50, 10).Should().Be(BatteryHealth.Good);
-        BatteryState.DeriveHealth(100, 10).Should().Be(BatteryHealth.Good);
-    }
-
-    [Fact]
-    public void BatteryState_DeriveHealth_Fair()
-    {
-        BatteryState.DeriveHealth(49, 10).Should().Be(BatteryHealth.Fair);
-        BatteryState.DeriveHealth(20, 10).Should().Be(BatteryHealth.Fair);
-    }
-
-    [Fact]
-    public void BatteryState_DeriveHealth_Low()
-    {
-        BatteryState.DeriveHealth(19, 10).Should().Be(BatteryHealth.Low);
-        BatteryState.DeriveHealth(10, 10).Should().Be(BatteryHealth.Low);
-    }
-
-    [Fact]
-    public void BatteryState_DeriveHealth_Critical()
-    {
-        BatteryState.DeriveHealth(9, 10).Should().Be(BatteryHealth.Critical);
-        BatteryState.DeriveHealth(0, 10).Should().Be(BatteryHealth.Critical);
-    }
-
-    [Fact]
     public void BatteryState_Disconnected_HasDefaultValues()
     {
         var state = BatteryState.Disconnected;

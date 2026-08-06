@@ -9,8 +9,6 @@ public class BatteryMonitorService : IBatteryMonitorService, IDisposable
     private readonly IHidDeviceService _hidDeviceService;
     private readonly ISettingsService _settingsService;
     private readonly IStorageService _storageService;
-    private readonly IBatteryEstimationService _estimationService;
-    private readonly INotificationService _notificationService;
     private readonly SemaphoreSlim _pollingTickGate = new(1, 1);
 
     private readonly object _stateLock = new();
@@ -23,8 +21,6 @@ public class BatteryMonitorService : IBatteryMonitorService, IDisposable
     private DateTime _lastSuccessfulReadUtc = DateTime.MinValue;
     private DateTime _lastAbsenceCheckUtc = DateTime.MinValue;
     private bool _lastAbsenceCheckResult;
-    private DateTime _lastLearnedRatesPersistUtc = DateTime.MinValue;
-    private int _successfulReadsSinceLearnedPersist;
     private bool _disposed;
     private bool _rescanRequested;
 
@@ -47,33 +43,14 @@ public class BatteryMonitorService : IBatteryMonitorService, IDisposable
     private const int ConsecutiveZeroReadsForSleep = 3;
 
     // Wired-device-based charging: use wired HID presence as the charging signal.
-    // While charging, prefer real-time battery readings from the active profile when
-    // they look plausible. Fall back to the Li-ion charge curve model when the device
-    // reports no data (or clearly bogus low/status values).
     private bool _lastWiredPresent;
-    private DateTime? _chargeStartTime;
-    private int _chargeStartLevel;
 
     // Post-disconnect settling: when the USB cable is unplugged, the device stops
     // responding to GetFeature for a few seconds while it transitions back to wireless.
     // Skip polling during this window to avoid accumulating false failures.
     private DateTime? _cableDisconnectTime;
     private static readonly TimeSpan PostDisconnectSettlingDelay = TimeSpan.FromSeconds(5);
-    private DateTime? _pendingUnplugCalibrationUtc;
-    private int? _pendingUnplugCalibrationAnchorLevel;
-    private bool _awaitingUnplugCalibrationSample;
-    private static readonly TimeSpan MaxUnplugCalibrationWindow = TimeSpan.FromMinutes(10);
-    private const int MinUnplugCalibrationDrop = 5;
-    private const int MaxUnplugCalibrationDrop = 40;
-    private const int MinLevelForUnplugCalibration = 20;
-    private const int ChargeCalibrationFullConfidenceObservations = 6;
 
-    // Li-ion charge curve constants (typical for 500-700mAh gaming mouse cells)
-    private const double CcRatePerHour = 60.0;   // CC phase (<80%): 60%/hr
-    private const double CvRateMaxPerHour = 60.0; // CV phase start rate at 80%
-    private const double CvRateMinPerHour = 10.0; // CV phase end rate at 100%
-    private const int CvThreshold = 80;           // CC->CV transition point
-    private const int MaxEstimatedLevel = 99;     // Can't confirm 100% without real reading
     private const int SuspiciousChargingLowThreshold = 10;
     private const int SuspiciousChargingDropThreshold = 20;
 
@@ -83,9 +60,6 @@ public class BatteryMonitorService : IBatteryMonitorService, IDisposable
     private static readonly TimeSpan MinNoSuccessBeforeReconnect = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan MinNoSuccessBeforeReconnectCandidateF = TimeSpan.FromSeconds(60);
     private static readonly TimeSpan MinNoSuccessBeforeReconnectCandidateG = TimeSpan.FromSeconds(90);
-    private static readonly TimeSpan LearnedRatesPersistInterval = TimeSpan.FromMinutes(2);
-    private static readonly TimeSpan ExhaustedProbeDebounce = TimeSpan.FromSeconds(60);
-    private const int SuccessfulReadsPerLearnedPersist = 6;
     private const int MaxConsecutiveFailuresBeforeReconnect = 3;
 
     // CandidateF does not always get a response on every poll cycle - the device
@@ -102,27 +76,21 @@ public class BatteryMonitorService : IBatteryMonitorService, IDisposable
     private const int MaxConsecutiveFailuresCandidateG = 10;
 
     public BatteryState CurrentState { get; private set; } = BatteryState.Disconnected;
-    public BatteryEstimate CurrentEstimate { get; private set; } = BatteryEstimate.Invalid;
     public bool IsRunning => _pollingTask != null && !_pollingTask.IsCompleted;
 
     public event Action<BatteryState>? BatteryStateChanged;
-    public event Action<BatteryEstimate>? EstimateChanged;
     public event Action<string>? ProbeStatusChanged;
 
     public BatteryMonitorService(
         ILogger<BatteryMonitorService> logger,
         IHidDeviceService hidDeviceService,
         ISettingsService settingsService,
-        IStorageService storageService,
-        IBatteryEstimationService estimationService,
-        INotificationService notificationService)
+        IStorageService storageService)
     {
         _logger = logger;
         _hidDeviceService = hidDeviceService;
         _settingsService = settingsService;
         _storageService = storageService;
-        _estimationService = estimationService;
-        _notificationService = notificationService;
     }
 
     public Task StartAsync(CancellationToken cancellationToken = default)
@@ -145,7 +113,6 @@ public class BatteryMonitorService : IBatteryMonitorService, IDisposable
                 Level = 75,
                 IsCharging = false,
                 Connection = ConnectionState.Connected,
-                Health = BatteryHealth.Good,
                 DeviceName = "Mock Device (GBM_NO_HID)",
                 LastReadTime = DateTime.UtcNow
             });
@@ -168,7 +135,6 @@ public class BatteryMonitorService : IBatteryMonitorService, IDisposable
 
         try
         {
-            PersistLearnedRatesForActiveProfile(force: true);
             _cts.Cancel();
 
             if (_pollingTask != null)
@@ -198,16 +164,6 @@ public class BatteryMonitorService : IBatteryMonitorService, IDisposable
     {
         _logger.LogInformation("Rescan triggered");
 
-        string? activeDeviceKey = _activeProfile?.CompositeKey;
-        if (!string.IsNullOrWhiteSpace(activeDeviceKey))
-        {
-            _estimationService.Reset(activeDeviceKey);
-        }
-        else if (!string.IsNullOrWhiteSpace(CurrentState.DeviceName))
-        {
-            _estimationService.Reset(CurrentState.DeviceName);
-        }
-
         _rescanRequested = true;
         _activeProfile = null;
         _consecutiveFailures = 0;
@@ -217,15 +173,8 @@ public class BatteryMonitorService : IBatteryMonitorService, IDisposable
         _lastReconnectTriggerUtc = DateTime.MinValue;
         _lastAbsenceCheckUtc = DateTime.MinValue;
         _lastAbsenceCheckResult = false;
-        _lastLearnedRatesPersistUtc = DateTime.MinValue;
-        _successfulReadsSinceLearnedPersist = 0;
         _lastWiredPresent = false;
-        _chargeStartTime = null;
-        _chargeStartLevel = 0;
         _cableDisconnectTime = null;
-        _pendingUnplugCalibrationUtc = null;
-        _pendingUnplugCalibrationAnchorLevel = null;
-        _awaitingUnplugCalibrationSample = false;
         _probeExhausted = false;
         _exhaustedProbeDebounce = TimeSpan.FromSeconds(60);
     }
@@ -234,14 +183,6 @@ public class BatteryMonitorService : IBatteryMonitorService, IDisposable
     {
         // Try to restore cached profile first
         TryRestoreCachedProfile();
-
-        // Seed estimation service with historical rates from disk
-        SeedHistoricalRates();
-
-        // Check if USB cable is already plugged in at startup (PID 0x824A present).
-        // Without this, the wired-presence transition only fires on hot-plug events,
-        // so restarting the app while charging would miss the cable.
-        SeedWiredPresenceOnStartup();
 
         // Poll immediately on startup - don't wait for the first timer tick
         await PollOnceAsync(cancellationToken).ConfigureAwait(false);
@@ -327,38 +268,17 @@ public class BatteryMonitorService : IBatteryMonitorService, IDisposable
 
                 if (wiredPresent && !_lastWiredPresent)
                 {
-                    ClearPendingUnplugCalibration();
-
-                    // Cable just plugged in - record charge start for estimation.
-                    // Do NOT reset _activeProfile or trigger reconnect: the CandidateF
-                    // poll on PID=0x824D remains valid while the cable is in.
-                    _chargeStartTime = DateTime.UtcNow;
-                    _chargeStartLevel = _lastPositiveLevel > 0 ? _lastPositiveLevel : 0;
+                    // Cable just plugged in. Do NOT reset _activeProfile or trigger
+                    // reconnect: the CandidateF poll on PID=0x824D remains valid while
+                    // the cable is in.
                     _consecutiveFailures = 0;
-                    _logger.LogInformation(
-                        "[MONITOR] Charge started at {Level}% for {Model}",
-                        _chargeStartLevel, modelName);
                 }
                 else if (!wiredPresent)
                 {
-                    int anchorLevel = CurrentState.Level > 0 ? CurrentState.Level : _lastPositiveLevel;
-                    if (anchorLevel >= MinLevelForUnplugCalibration)
-                    {
-                        _pendingUnplugCalibrationAnchorLevel = anchorLevel;
-                        _pendingUnplugCalibrationUtc = DateTime.UtcNow;
-                        _awaitingUnplugCalibrationSample = true;
-                    }
-                    else
-                    {
-                        ClearPendingUnplugCalibration();
-                    }
-
-                    // Cable unplugged - clear charge tracking.
-                    // The device needs a few seconds to settle back into wireless mode
-                    // before it will respond to GetFeature again. Record the disconnect
-                    // time so PollOnceAsync can skip reads during the settling period.
-                    _chargeStartTime = null;
-                    _chargeStartLevel = 0;
+                    // Cable unplugged. The device needs a few seconds to settle back
+                    // into wireless mode before it will respond to GetFeature again.
+                    // Record the disconnect time so PollOnceAsync can skip reads
+                    // during the settling period.
                     _consecutiveFailures = 0;
                     _cableDisconnectTime = DateTime.UtcNow;
                     _logger.LogInformation(
@@ -375,24 +295,17 @@ public class BatteryMonitorService : IBatteryMonitorService, IDisposable
                 _cableDisconnectTime = null;
 
                 // While charging, prefer real telemetry from the active profile.
-                // If it is unavailable (or clearly implausible), fall back to the
-                // learned Li-ion charge curve estimate.
+                // If it is unavailable (or clearly implausible), just keep showing
+                // the last known level with IsCharging=true rather than fabricating one.
                 if (TryReadRealtimeChargingLevel(out int realtimeLevel))
                 {
                     _consecutiveFailures = 0;
-
-                    // Rebase the fallback curve from the latest valid real sample so
-                    // future estimate-only ticks continue from a fresh anchor point.
-                    _chargeStartTime = DateTime.UtcNow;
-                    _chargeStartLevel = realtimeLevel;
-
                     ProcessSuccessfulRead(realtimeLevel, isCharging: true);
                     return Task.CompletedTask;
                 }
 
-                int estimatedLevel = EstimateChargingLevel();
                 _consecutiveFailures = 0;
-                ProcessSuccessfulRead(estimatedLevel, isCharging: true);
+                ProcessSuccessfulRead(_lastPositiveLevel > 0 ? _lastPositiveLevel : 0, isCharging: true, skipIfZero: true);
             }
             else
             {
@@ -407,7 +320,7 @@ public class BatteryMonitorService : IBatteryMonitorService, IDisposable
                         PostDisconnectSettlingDelay.TotalSeconds);
                     // Keep state as Connected with last known level, just not charging
                     if (_lastPositiveLevel > 0)
-                        ProcessSuccessfulRead(_lastPositiveLevel, isCharging: false, skipEstimationSample: true);
+                        ProcessSuccessfulRead(_lastPositiveLevel, isCharging: false);
                     return Task.CompletedTask;
                 }
 
@@ -434,15 +347,7 @@ public class BatteryMonitorService : IBatteryMonitorService, IDisposable
                                 "- using last known level {Last}%",
                                 result.BatteryLevel, _lastPositiveLevel);
                             ProcessSuccessfulRead(_lastPositiveLevel, isCharging: true);
-
-                            // Also fix up wired tracking state so subsequent polls use the estimate path
-                            if (!_lastWiredPresent)
-                            {
-                                _lastWiredPresent = true;
-                                _chargeStartTime = DateTime.UtcNow;
-                                _chargeStartLevel = _lastPositiveLevel;
-                            }
-
+                            _lastWiredPresent = true;
                             return Task.CompletedTask;
                         }
                     }
@@ -465,98 +370,6 @@ public class BatteryMonitorService : IBatteryMonitorService, IDisposable
         }
 
         return Task.CompletedTask;
-    }
-
-    /// <summary>
-    /// Estimate the current battery level during charging using a Li-ion charge curve model.
-    /// Uses learned charge rate from historical data when available, falling back to defaults.
-    /// CC phase (below 80%): constant rate. CV phase (80-100%): rate tapers linearly.
-    /// </summary>
-    private int EstimateChargingLevel()
-    {
-        if (_chargeStartTime == null || _chargeStartLevel <= 0)
-        {
-            // Started app while already charging - no baseline level available.
-            // Fall back to last known level (may be 0 if none available).
-            return _lastPositiveLevel > 0 ? _lastPositiveLevel : 0;
-        }
-
-        double elapsedHours = (DateTime.UtcNow - _chargeStartTime.Value).TotalHours;
-        if (elapsedHours <= 0)
-            return _chargeStartLevel;
-
-        // Use learned charge rate if available, otherwise fall back to defaults
-        double ccRate = CcRatePerHour;
-        double cvMax = CvRateMaxPerHour;
-        double cvMin = CvRateMinPerHour;
-
-        string deviceKey = _activeProfile?.CompositeKey ?? _activeProfile?.ModelName ?? "";
-        var learned = _estimationService.GetLearnedRates(deviceKey);
-        if (learned?.ChargeRate > 0)
-        {
-            ccRate = learned.ChargeRate.Value;
-            cvMax = ccRate;
-            cvMin = ccRate / 6.0; // CV phase tapers to ~1/6 of CC rate
-        }
-
-        // Walk the charge curve in small time steps for accuracy through the CC->CV transition
-        double level = _chargeStartLevel;
-        double stepHours = 1.0 / 3600.0; // 1-second steps
-        double remaining = elapsedHours;
-
-        while (remaining > 0 && level < MaxEstimatedLevel)
-        {
-            double step = Math.Min(remaining, stepHours);
-            double rate;
-
-            if (level < CvThreshold)
-            {
-                // CC phase: constant rate
-                rate = ccRate;
-            }
-            else
-            {
-                // CV phase: rate tapers linearly from cvMax at 80% to cvMin at 100%
-                double progress = (level - CvThreshold) / (100.0 - CvThreshold);
-                rate = cvMax - (cvMax - cvMin) * progress;
-            }
-
-            level += rate * step;
-            remaining -= step;
-        }
-
-        level = ApplyChargeCalibrationCorrection(level);
-
-        int result = Math.Min((int)Math.Round(level), MaxEstimatedLevel);
-        return Math.Max(result, _chargeStartLevel); // Never go below start level
-    }
-
-    private double ApplyChargeCalibrationCorrection(double estimatedLevel)
-    {
-        if (_activeProfile == null)
-            return estimatedLevel;
-
-        if (_chargeStartLevel <= 0 || estimatedLevel <= _chargeStartLevel)
-            return estimatedLevel;
-
-        string deviceKey = _activeProfile.CompositeKey ?? _activeProfile.ModelName;
-        var calibration = _estimationService.GetChargeCalibration(deviceKey);
-        if (calibration == null || calibration.OvershootPercent <= 0)
-            return estimatedLevel;
-
-        double span = Math.Max(1.0, 100.0 - _chargeStartLevel);
-        double progress = Math.Clamp((estimatedLevel - _chargeStartLevel) / span, 0.0, 1.0);
-        if (progress <= 0)
-            return estimatedLevel;
-
-        double confidence = Math.Clamp(
-            calibration.ObservationCount / (double)ChargeCalibrationFullConfidenceObservations,
-            0.25,
-            1.0);
-        double correction = calibration.OvershootPercent * progress * confidence;
-        double corrected = estimatedLevel - correction;
-
-        return Math.Max(corrected, _chargeStartLevel);
     }
 
     private bool TryReadRealtimeChargingLevel(out int level)
@@ -706,8 +519,11 @@ public class BatteryMonitorService : IBatteryMonitorService, IDisposable
         }
     }
 
-    private void ProcessSuccessfulRead(int level, bool isCharging, bool skipEstimationSample = false)
+    private void ProcessSuccessfulRead(int level, bool isCharging, bool skipIfZero = false)
     {
+        if (skipIfZero && level <= 0)
+            return;
+
         _lastSuccessfulReadUtc = DateTime.UtcNow;
         _lastAbsenceCheckResult = false;
         _consecutiveFailures = 0;
@@ -716,11 +532,9 @@ public class BatteryMonitorService : IBatteryMonitorService, IDisposable
         // Use the last known level instead and track consecutive zero reads.
         int displayLevel = level;
         ConnectionState connection = ConnectionState.Connected;
-        bool suppressedSleepRead = false;
 
         if (level == 0 && _lastPositiveLevel > 0)
         {
-            suppressedSleepRead = true;
             _consecutiveZeroReads++;
             displayLevel = _lastPositiveLevel;
             _consecutiveFailures = 0;
@@ -740,38 +554,14 @@ public class BatteryMonitorService : IBatteryMonitorService, IDisposable
 
         var previousState = CurrentState;
         string modelName = _activeProfile?.ModelName ?? "Glorious Mouse";
-        string deviceKey = _activeProfile?.CompositeKey ?? modelName;
-        int criticalThreshold = _settingsService.Current.CriticalBatteryThreshold;
-
-        DateTime now = DateTime.UtcNow;
-
-        // Look up stored charge info
-        var storedData = _storageService.GetDeviceChargeData(deviceKey);
-        DateTime? lastChargeTime = storedData?.LastChargeTime;
-        int? lastChargeLevel = storedData?.LastChargeLevel;
-
-        // Update charge time tracking
-        if (isCharging)
-        {
-            lastChargeTime = now;
-            lastChargeLevel = displayLevel;
-        }
-        else if (ShouldPromoteObservedLevelToLastCharge(displayLevel, lastChargeLevel))
-        {
-            lastChargeTime ??= now;
-            lastChargeLevel = displayLevel;
-        }
 
         var newState = new BatteryState
         {
             Level = displayLevel,
             IsCharging = isCharging,
             Connection = connection,
-            Health = BatteryState.DeriveHealth(displayLevel, criticalThreshold),
             DeviceName = modelName,
-            LastReadTime = now,
-            LastChargeTime = lastChargeTime,
-            LastChargeLevel = lastChargeLevel
+            LastReadTime = DateTime.UtcNow
         };
 
         UpdateState(newState);
@@ -786,86 +576,6 @@ public class BatteryMonitorService : IBatteryMonitorService, IDisposable
         {
             _logger.LogInformation("[MONITOR] Mouse woke from sleep state");
         }
-
-        // Update storage
-        _storageService.AddBatterySample(deviceKey, displayLevel, isCharging);
-
-        // Update estimation
-        bool wakingFromSleep = previousState.Connection == ConnectionState.Sleeping &&
-                               connection == ConnectionState.Connected;
-        bool shouldSkipEstimationSample = skipEstimationSample ||
-                                          suppressedSleepRead ||
-                                          connection == ConnectionState.Sleeping ||
-                                          wakingFromSleep;
-
-        if (!shouldSkipEstimationSample)
-        {
-            _estimationService.AddSample(deviceKey, displayLevel, isCharging);
-        }
-
-        TryLearnFromPostUnplugObservation(deviceKey, displayLevel, isCharging, shouldSkipEstimationSample);
-
-        var estimate = _estimationService.GetEstimate(deviceKey);
-        UpdateEstimate(estimate);
-        _successfulReadsSinceLearnedPersist++;
-
-        // Persist learned rates when charging state changes (session rate just got blended)
-        if (previousState.IsCharging != isCharging)
-        {
-            PersistLearnedRates(deviceKey, force: true);
-        }
-        else if (_successfulReadsSinceLearnedPersist >= SuccessfulReadsPerLearnedPersist ||
-                 DateTime.UtcNow - _lastLearnedRatesPersistUtc >= LearnedRatesPersistInterval)
-        {
-            PersistLearnedRates(deviceKey, force: false);
-        }
-
-        // Process notifications
-        _notificationService.ProcessBatteryUpdate(newState, previousState, _settingsService.Current);
-    }
-
-    private static bool ShouldPromoteObservedLevelToLastCharge(int observedLevel, int? lastChargeLevel)
-    {
-        return lastChargeLevel.HasValue &&
-               observedLevel > 0 &&
-               observedLevel <= 100 &&
-               observedLevel > lastChargeLevel.Value;
-    }
-
-    private void TryLearnFromPostUnplugObservation(string deviceKey, int level, bool isCharging, bool skipEstimationSample)
-    {
-        if (!_awaitingUnplugCalibrationSample)
-            return;
-
-        if (isCharging || skipEstimationSample)
-            return;
-
-        DateTime? unplugTime = _pendingUnplugCalibrationUtc;
-        int? anchorLevel = _pendingUnplugCalibrationAnchorLevel;
-        ClearPendingUnplugCalibration();
-
-        if (!unplugTime.HasValue || !anchorLevel.HasValue)
-            return;
-
-        TimeSpan elapsed = DateTime.UtcNow - unplugTime.Value;
-        if (elapsed <= TimeSpan.Zero || elapsed > MaxUnplugCalibrationWindow)
-            return;
-
-        if (anchorLevel.Value < MinLevelForUnplugCalibration)
-            return;
-
-        int drop = anchorLevel.Value - level;
-        if (drop < MinUnplugCalibrationDrop || drop > MaxUnplugCalibrationDrop)
-            return;
-
-        _estimationService.ObserveChargeDropAfterUnplug(deviceKey, anchorLevel.Value, level, elapsed);
-    }
-
-    private void ClearPendingUnplugCalibration()
-    {
-        _pendingUnplugCalibrationUtc = null;
-        _pendingUnplugCalibrationAnchorLevel = null;
-        _awaitingUnplugCalibrationSample = false;
     }
 
     private void ProcessFailedRead()
@@ -972,15 +682,11 @@ public class BatteryMonitorService : IBatteryMonitorService, IDisposable
             Level = previousState.Level,
             IsCharging = false,
             Connection = ConnectionState.NotConnected,
-            Health = previousState.Health,
             DeviceName = previousState.DeviceName,
-            LastReadTime = previousState.LastReadTime,
-            LastChargeTime = previousState.LastChargeTime,
-            LastChargeLevel = previousState.LastChargeLevel
+            LastReadTime = previousState.LastReadTime
         };
 
         UpdateState(disconnectedState);
-        _notificationService.ProcessBatteryUpdate(disconnectedState, previousState, _settingsService.Current);
     }
 
     private void TransitionToLastKnown()
@@ -1018,23 +724,6 @@ public class BatteryMonitorService : IBatteryMonitorService, IDisposable
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error in BatteryStateChanged event handler");
-        }
-    }
-
-    private void UpdateEstimate(BatteryEstimate estimate)
-    {
-        lock (_stateLock)
-        {
-            CurrentEstimate = estimate;
-        }
-
-        try
-        {
-            EstimateChanged?.Invoke(estimate);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error in EstimateChanged event handler");
         }
     }
 
@@ -1125,134 +814,6 @@ public class BatteryMonitorService : IBatteryMonitorService, IDisposable
         }
     }
 
-    private void SeedHistoricalRates()
-    {
-        try
-        {
-            var chargeData = _storageService.LoadChargeData();
-            foreach (var (key, data) in chargeData.Devices)
-            {
-                if (data.LearnedDischargeRate.HasValue || data.LearnedChargeRate.HasValue)
-                {
-                    _estimationService.SetHistoricalRates(key,
-                        data.LearnedDischargeRate, data.LearnedChargeRate,
-                        data.DischargeSessionCount, data.ChargeSessionCount);
-                }
-
-                if (data.LearnedChargeOvershootPercent.HasValue && data.ChargeOvershootObservationCount > 0)
-                {
-                    _estimationService.SetChargeCalibration(
-                        key,
-                        data.LearnedChargeOvershootPercent,
-                        data.ChargeOvershootObservationCount);
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to seed historical rates from storage");
-        }
-    }
-
-    /// <summary>
-    /// On startup, detect if the USB cable (PID 0x824A) is already plugged in.
-    /// Seeds _lastWiredPresent, _chargeStartTime, and _chargeStartLevel so the
-    /// first PollOnceAsync correctly enters the charging path with a valid baseline.
-    /// </summary>
-    private void SeedWiredPresenceOnStartup()
-    {
-        try
-        {
-            string? modelName = _activeProfile?.ModelName;
-            if (string.IsNullOrEmpty(modelName))
-                return;
-
-            bool wiredPresent = _hidDeviceService.IsWiredDevicePresent(modelName);
-            if (!wiredPresent)
-                return;
-
-            _logger.LogInformation(
-                "[D2] PID=0x824A detected on startup - USB cable is plugged in");
-            _lastWiredPresent = true;
-
-            // Seed charge baseline from persisted data so EstimateChargingLevel
-            // has a starting point instead of returning 0%.
-            string deviceKey = _activeProfile?.CompositeKey ?? modelName;
-            var storedData = _storageService.GetDeviceChargeData(deviceKey);
-            int baseline = storedData?.LastKnownLevel ?? 0;
-
-            if (baseline > 0)
-            {
-                _lastPositiveLevel = baseline;
-                _chargeStartLevel = baseline;
-                _chargeStartTime = storedData?.LastChargeTime ?? DateTime.UtcNow;
-                _logger.LogInformation(
-                    "[D2] Seeded charge baseline from storage: {Level}%, chargeStart={Start}",
-                    baseline, _chargeStartTime);
-            }
-            else
-            {
-                // No stored level - we'll report charging with 0% until real data arrives.
-                _chargeStartTime = DateTime.UtcNow;
-                _chargeStartLevel = 0;
-                _logger.LogWarning(
-                    "[D2] USB cable present on startup but no stored battery baseline - " +
-                    "charge estimate will start at 0%");
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to seed wired presence on startup");
-        }
-    }
-
-    private void PersistLearnedRatesForActiveProfile(bool force)
-    {
-        string? key = _activeProfile?.CompositeKey;
-        if (!string.IsNullOrWhiteSpace(key))
-        {
-            PersistLearnedRates(key, force);
-        }
-    }
-
-    private void PersistLearnedRates(string deviceKey, bool force)
-    {
-        try
-        {
-            var learned = _estimationService.GetLearnedRates(deviceKey);
-            if (learned != null)
-            {
-                _storageService.UpdateLearnedRates(deviceKey,
-                    learned.DischargeRate, learned.ChargeRate,
-                    learned.DischargeSessionCount, learned.ChargeSessionCount, force);
-            }
-
-            var calibration = _estimationService.GetChargeCalibration(deviceKey);
-            if (calibration != null)
-            {
-                _storageService.UpdateChargeCalibration(
-                    deviceKey,
-                    calibration.OvershootPercent,
-                    calibration.ObservationCount,
-                    force);
-            }
-
-            if (learned != null || calibration != null)
-            {
-                _lastLearnedRatesPersistUtc = DateTime.UtcNow;
-                _successfulReadsSinceLearnedPersist = 0;
-                if (force)
-                {
-                    _logger.LogDebug("Persisted learned data for {Key} (forced)", deviceKey);
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to persist learned rates for device {Key}", deviceKey);
-        }
-    }
-
     public void Dispose()
     {
         if (_disposed)
@@ -1262,7 +823,6 @@ public class BatteryMonitorService : IBatteryMonitorService, IDisposable
 
         try
         {
-            PersistLearnedRatesForActiveProfile(force: true);
             _cts?.Cancel();
             _cts?.Dispose();
         }
