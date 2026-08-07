@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🖱️ Glorious Battery Monitor (GBM)
+# 🖱️ SIMPLER Glorious Battery Monitor (GBM) (FORKED REPO)
 
 **A lightweight, open-source system tray app for checking real-time battery levels of Glorious wireless mice.**
 
