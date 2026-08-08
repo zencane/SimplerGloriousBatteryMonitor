@@ -22,7 +22,9 @@ public class BatteryMonitorService : IBatteryMonitorService, IDisposable
     private DateTime _lastAbsenceCheckUtc = DateTime.MinValue;
     private bool _lastAbsenceCheckResult;
     private bool _disposed;
-    private bool _rescanRequested;
+    private volatile bool _rescanRequested;
+
+    private static readonly TimeSpan PollWaitGranularity = TimeSpan.FromMilliseconds(250);
 
     // Probe exhaustion: when known devices are present but all probe candidates fail,
     // avoid re-entering "Connecting" state every poll cycle (which takes 15-20s per attempt
@@ -184,23 +186,15 @@ public class BatteryMonitorService : IBatteryMonitorService, IDisposable
         // Try to restore cached profile first
         TryRestoreCachedProfile();
 
-        // Poll immediately on startup - don't wait for the first timer tick
+        // Poll immediately on startup - don't wait out the first interval
         await PollOnceAsync(cancellationToken).ConfigureAwait(false);
 
         while (!cancellationToken.IsCancellationRequested)
         {
             try
             {
-                int intervalSeconds = _settingsService.Current.RefreshIntervalSeconds;
-                if (intervalSeconds < 1)
-                    intervalSeconds = 5;
-
-                using var timer = new PeriodicTimer(TimeSpan.FromSeconds(intervalSeconds));
-
-                while (await timer.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false))
-                {
-                    await PollOnceAsync(cancellationToken).ConfigureAwait(false);
-                }
+                await WaitForNextPollAsync(cancellationToken).ConfigureAwait(false);
+                await PollOnceAsync(cancellationToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -222,6 +216,26 @@ public class BatteryMonitorService : IBatteryMonitorService, IDisposable
         }
     }
 
+    private async Task WaitForNextPollAsync(CancellationToken cancellationToken)
+    {
+        var waitStart = DateTime.UtcNow;
+
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            if (_rescanRequested)
+                return;
+
+            int intervalSeconds = _settingsService.Current.RefreshIntervalSeconds;
+            if (intervalSeconds < 1)
+                intervalSeconds = 5;
+
+            if (DateTime.UtcNow - waitStart >= TimeSpan.FromSeconds(intervalSeconds))
+                return;
+
+            await Task.Delay(PollWaitGranularity, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
     private Task PollOnceAsync(CancellationToken cancellationToken)
     {
         if (!_pollingTickGate.Wait(0, cancellationToken))
@@ -237,6 +251,8 @@ public class BatteryMonitorService : IBatteryMonitorService, IDisposable
                 _rescanRequested = false;
                 _activeProfile = null;
                 _consecutiveFailures = 0;
+                _lastReconnectAttempt = DateTime.MinValue;
+                TryRestoreCachedProfile();
             }
 
             // If no active device, try to find one
@@ -533,11 +549,13 @@ public class BatteryMonitorService : IBatteryMonitorService, IDisposable
         int displayLevel = level;
         ConnectionState connection = ConnectionState.Connected;
 
-        if (level == 0 && _lastPositiveLevel > 0)
+        if (level == 0)
         {
             _consecutiveZeroReads++;
-            displayLevel = _lastPositiveLevel;
             _consecutiveFailures = 0;
+
+            if (_lastPositiveLevel > 0)
+                displayLevel = _lastPositiveLevel;
 
             if (_consecutiveZeroReads >= ConsecutiveZeroReadsForSleep)
             {

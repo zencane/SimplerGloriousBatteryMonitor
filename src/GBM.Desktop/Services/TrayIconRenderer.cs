@@ -12,6 +12,10 @@ internal static class TrayIconRenderer
 {
     private const int IconSize = 32;
     private const int MaxCachedIcons = 96;
+    private const int MaxDisplayLevel = 99;
+    private const double GlyphStrokeThickness = 1.4;
+    private const double ChargingDotSize = 5.0;
+    private const double ChargingDotInset = 1.0;
     private static readonly object CacheLock = new();
     private static readonly Dictionary<IconCacheKey, CacheEntry> IconCache = new();
     private static readonly LinkedList<IconCacheKey> CacheOrder = new();
@@ -25,7 +29,7 @@ internal static class TrayIconRenderer
 
     public static WindowIcon? RenderIcon(int level, bool isCharging, bool isConnected)
     {
-        level = Math.Clamp(level, 0, 100);
+        level = Math.Clamp(level, 0, MaxDisplayLevel);
         var cacheKey = isConnected
             ? new IconCacheKey(level, isCharging, true)
             : new IconCacheKey(0, false, false);
@@ -129,26 +133,47 @@ internal static class TrayIconRenderer
         {
             var fillColor = GetFillColor(Level, IsCharging, IsConnected);
             var text = IsConnected ? Level.ToString() : "--";
-            var fontSize = Level >= 100 ? 14.0 : (Level >= 10 || !IsConnected ? 18.0 : 22.0);
+            var fontSize = text.Length > 1 ? 21.0 : 26.0;
 
+            var brush = new SolidColorBrush(fillColor);
             var formattedText = new FormattedText(
                 text,
                 CultureInfo.InvariantCulture,
                 FlowDirection.LeftToRight,
-                new Typeface(FontFamily.Default, FontStyle.Normal, FontWeight.Bold),
+                new Typeface(FontFamily.Default, FontStyle.Normal, FontWeight.Black),
                 fontSize,
-                new SolidColorBrush(fillColor));
+                brush);
 
             var x = (IconSize - formattedText.Width) / 2.0;
             var y = (IconSize - formattedText.Height) / 2.0;
-            context.DrawText(formattedText, new Point(x, y));
+
+            var geometry = formattedText.BuildGeometry(new Point(x, y));
+            if (geometry != null)
+            {
+                var pen = new Pen(brush, GlyphStrokeThickness)
+                {
+                    LineCap = PenLineCap.Round,
+                    LineJoin = PenLineJoin.Round
+                };
+                context.DrawGeometry(brush, pen, geometry);
+            }
+            else
+            {
+                context.DrawText(formattedText, new Point(x, y));
+            }
 
             if (IsCharging && IsConnected)
             {
                 context.DrawRectangle(
                     new SolidColorBrush(GreenColor),
                     null,
-                    new RoundedRect(new Rect(24, 24, 6, 6), 3));
+                    new RoundedRect(
+                        new Rect(
+                            IconSize - ChargingDotInset - ChargingDotSize,
+                            IconSize - ChargingDotInset - ChargingDotSize,
+                            ChargingDotSize,
+                            ChargingDotSize),
+                        ChargingDotSize / 2.0));
             }
         }
     }

@@ -149,6 +149,37 @@ public class BatteryMonitorReliabilityTests
         GetPrivateField<DeviceProfile?>(monitor, "_activeProfile").Should().BeNull();
     }
 
+    [Fact]
+    public async Task Rescan_RecoversCachedPassiveReadProfile_WhenDeviceDoesNotAnswerFirstRead()
+    {
+        var monitor = CreateMonitor(out var hid, out _, out var storage);
+        var profile = CreateProfile(PixartBatteryMethod.CandidateG);
+
+        storage.Setup(s => s.LoadProfiles()).Returns(new List<DeviceProfile> { profile });
+        hid.Setup(s => s.IsDevicePresent(It.IsAny<DeviceProfile>())).Returns(true);
+        hid.Setup(s => s.ReadBattery(It.IsAny<DeviceProfile>())).Returns((false, 0, false));
+
+        monitor.TriggerRescan();
+        await InvokePrivateAsync(monitor, "PollOnceAsync", CancellationToken.None);
+
+        GetPrivateField<DeviceProfile?>(monitor, "_activeProfile").Should().NotBeNull(
+            "a rescan should trust a present cached profile the same way startup does");
+    }
+
+    [Fact]
+    public void ProcessSuccessfulRead_ColdStartZeroLevel_DoesNotReportConnectedAtZeroPercent()
+    {
+        var monitor = CreateMonitor(out _, out _, out _);
+        SetPrivateField(monitor, "_activeProfile", CreateProfile());
+
+        InvokePrivate(monitor, "ProcessSuccessfulRead", 0, false, false);
+        InvokePrivate(monitor, "ProcessSuccessfulRead", 0, false, false);
+        InvokePrivate(monitor, "ProcessSuccessfulRead", 0, false, false);
+
+        monitor.CurrentState.Connection.Should().Be(ConnectionState.Sleeping,
+            "repeated zero reads mean the mouse is asleep, not a connected 0% battery");
+    }
+
     private static BatteryMonitorService CreateMonitor(
         out Mock<IHidDeviceService> hid,
         out Mock<ISettingsService> settings,
