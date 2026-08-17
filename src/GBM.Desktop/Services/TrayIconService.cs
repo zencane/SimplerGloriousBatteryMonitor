@@ -85,6 +85,10 @@ public class TrayIconService : IDisposable
 
             _menu.Items.Add(new NativeMenuItemSeparator());
 
+            var restartItem = new NativeMenuItem("Restart");
+            restartItem.Click += (_, _) => RestartApplication();
+            _menu.Items.Add(restartItem);
+
             var quitItem = new NativeMenuItem("Quit");
             quitItem.Click += (_, _) =>
             {
@@ -119,6 +123,28 @@ public class TrayIconService : IDisposable
         catch (Exception ex)
         {
             _logger.LogError(ex, "[TRAY] Failed to initialize tray icon");
+        }
+    }
+
+    private void RestartApplication()
+    {
+        try
+        {
+            var exePath = Environment.ProcessPath;
+            if (string.IsNullOrEmpty(exePath))
+            {
+                _logger.LogError("[TRAY] Restart failed: could not determine process path");
+                return;
+            }
+
+            System.Diagnostics.Process.Start(exePath);
+
+            if (Application.Current?.ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
+                desktop.Shutdown();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[TRAY] Failed to restart application");
         }
     }
 
