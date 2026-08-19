@@ -14,6 +14,8 @@ internal static class TrayIconRenderer
     private const int MaxCachedIcons = 96;
     private const int MaxDisplayLevel = 99;
     private const double GlyphStrokeThickness = 1.4;
+    private const double GlyphFontSize = 30.0;
+    private static readonly FontFamily GlyphFontFamily = new("Consolas");
     private const double ChargingDotSize = 5.0;
     private const double ChargingDotInset = 1.0;
     private static readonly object CacheLock = new();
@@ -133,15 +135,14 @@ internal static class TrayIconRenderer
         {
             var fillColor = GetFillColor(Level, IsCharging, IsConnected);
             var text = IsConnected ? Level.ToString() : "--";
-            var fontSize = text.Length > 1 ? 21.0 : 26.0;
 
             var brush = new SolidColorBrush(fillColor);
             var formattedText = new FormattedText(
                 text,
                 CultureInfo.InvariantCulture,
                 FlowDirection.LeftToRight,
-                new Typeface(FontFamily.Default, FontStyle.Normal, FontWeight.Black),
-                fontSize,
+                new Typeface(GlyphFontFamily, FontStyle.Normal, FontWeight.Black),
+                GlyphFontSize,
                 brush);
 
             var x = (IconSize - formattedText.Width) / 2.0;
